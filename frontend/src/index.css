@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #080808;
+    --foreground: #F2F0EB;
+    --primary: #FF4D00;
+    --card: #111111;
+    --border: rgba(242, 240, 235, 0.08);
+  }
+
+  body {
+    background-color: #080808;
+    color: #F2F0EB;
+    font-family: 'Outfit', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+  }
+}
+
+/* Custom architectural hairline cards & panels */
+.card-panel {
+  background-color: #111111;
+  border: 1px solid rgba(242, 240, 235, 0.08);
+}
+
+.card-panel:hover {
+  border-color: rgba(242, 240, 235, 0.18);
+}
+
+.glass-header {
+  background: rgba(8, 8, 8, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(242, 240, 235, 0.08);
+}
+
+.grid-bg {
+  background-image: linear-gradient(rgba(242, 240, 235, 0.03) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(242, 240, 235, 0.03) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #080808;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #222222;
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #FF4D00;
+}
+
+/* Hide scrollbar for clean carousels when needed */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
