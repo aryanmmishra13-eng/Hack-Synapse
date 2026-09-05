@@ -489,3 +489,21 @@ class AllocationPolicy(Base):
     waitlist_weight = Column(Float, default=0.30)
     peak_weight = Column(Float, default=0.20)
     noshow_weight = Column(Float, default=0.20)
+
+# --- ML Injury Predictions ---
+class InjuryPrediction(Base):
+    __tablename__ = "injury_predictions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    risk_score = Column(Float, nullable=False)           # 0.0 – 1.0
+    risk_level = Column(String(20), nullable=False)      # LOW / MEDIUM / HIGH
+    predicted_injury = Column(String(100), nullable=True)
+    confidence = Column(Float, nullable=True)
+    top_factors = Column(Text, nullable=True)            # JSON string
+    recommendations = Column(Text, nullable=True)        # JSON string
+    features_used = Column(Text, nullable=True)          # JSON string of 67 features
+    ml_raw_response = Column(Text, nullable=True)        # full API response JSON
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", foreign_keys=[user_id])

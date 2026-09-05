@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  QrCode, Camera, CheckCircle2, XCircle, AlertTriangle, ShieldCheck, 
+import {
+  QrCode, Camera, CheckCircle2, XCircle, AlertTriangle, ShieldCheck,
   Clock, User, Building2, Package, RefreshCw, ArrowRight, History, Zap,
   Upload, Sparkles
 } from 'lucide-react';
@@ -64,7 +64,7 @@ export const AdminQRScannerPage = () => {
       if (html5QrCodeRef.current) {
         try {
           await html5QrCodeRef.current.stop();
-        } catch (e) {}
+        } catch (e) { }
       }
 
       const html5QrCode = new Html5Qrcode("reader");
@@ -112,7 +112,7 @@ export const AdminQRScannerPage = () => {
             stopCameraScanner();
             handleVerify(decodedText);
           },
-          () => {}
+          () => { }
         );
       } catch (fallbackErr) {
         setCameraError("Camera unavailable or permission denied. You can upload a QR image or enter the code manually below.");
@@ -207,12 +207,12 @@ export const AdminQRScannerPage = () => {
     <div className="space-y-8 pb-16">
       {/* Hidden container for file scanning */}
       <div id="reader-hidden" className="hidden"></div>
-      <input 
-        type="file" 
-        ref={fileInputRef} 
-        accept="image/*" 
-        onChange={handleFileUpload} 
-        className="hidden" 
+      <input
+        type="file"
+        ref={fileInputRef}
+        accept="image/*"
+        onChange={handleFileUpload}
+        className="hidden"
       />
 
       {/* Header */}
@@ -242,7 +242,7 @@ export const AdminQRScannerPage = () => {
 
       {/* Main Grid: Scanner Left / Result Right */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-        
+
         {/* Left Column: QR Input / Scanner */}
         <div className="lg:col-span-6 space-y-6">
           <div className="card-panel p-6 space-y-6">
@@ -261,8 +261,8 @@ export const AdminQRScannerPage = () => {
             {/* Camera Viewport */}
             <div className="space-y-3">
               <div className="relative">
-                <div 
-                  id="reader" 
+                <div
+                  id="reader"
                   className={`w-full overflow-hidden bg-black border ${scanning ? 'border-[#FF4D00]' : 'border-white/10'} min-h-[220px]`}
                 ></div>
 
@@ -415,15 +415,14 @@ export const AdminQRScannerPage = () => {
             {/* State 3: Result Card */}
             {verificationResult && !verifying && (
               <div className="space-y-5">
-                
+
                 {/* Status Banner */}
-                <div className={`p-4 border ${
-                  approvalResult?.success || (verificationResult.valid && verificationResult.can_approve)
+                <div className={`p-4 border ${approvalResult?.success || (verificationResult.valid && verificationResult.can_approve)
                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
                     : verificationResult.valid && !verificationResult.can_approve
-                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-                    : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
-                }`}>
+                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                      : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+                  }`}>
                   <div className="flex items-start gap-3">
                     {approvalResult?.success ? (
                       <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-400 mt-0.5" />
@@ -436,13 +435,13 @@ export const AdminQRScannerPage = () => {
                     )}
                     <div>
                       <h4 className="font-mono text-xs font-bold uppercase tracking-wider">
-                        {approvalResult?.success 
-                          ? "ENTRY PERMIT GRANTED" 
-                          : verificationResult.valid && verificationResult.can_approve 
-                          ? "VALID MATCH PASS DETECTED" 
-                          : verificationResult.valid 
-                          ? "ATTENTION REQUIRED" 
-                          : "INVALID / EXPIRED PASS"}
+                        {approvalResult?.success
+                          ? "ENTRY PERMIT GRANTED"
+                          : verificationResult.valid && verificationResult.can_approve
+                            ? "VALID MATCH PASS DETECTED"
+                            : verificationResult.valid
+                              ? "ATTENTION REQUIRED"
+                              : "INVALID / EXPIRED PASS"}
                       </h4>
                       <p className="text-xs mt-1 leading-relaxed">
                         {approvalResult ? approvalResult.message : verificationResult.message}
@@ -527,7 +526,7 @@ export const AdminQRScannerPage = () => {
                         </div>
                         <div className="flex flex-wrap gap-2">
                           {verificationResult.rentals.map((r, i) => (
-                            <span 
+                            <span
                               key={i}
                               className="px-2 py-1 bg-white/5 border border-white/10 text-white font-mono text-xs"
                             >

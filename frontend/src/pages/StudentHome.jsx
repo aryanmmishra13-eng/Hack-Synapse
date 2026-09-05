@@ -4,8 +4,9 @@ import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import { 
   Activity, Gamepad2, Users, CalendarCheck, Sparkles, Flame, 
-  ArrowRight, ArrowUpRight, Zap, Trophy, TrendingUp, Clock, ShieldCheck
+  ArrowRight, ArrowUpRight, Zap, Trophy, TrendingUp, Clock, ShieldCheck, ShieldAlert
 } from 'lucide-react';
+
 import api from '../services/api';
 import { DemandBar } from '../components/DemandBar';
 
@@ -44,7 +45,9 @@ export const StudentHome = () => {
     { label: "PLAY NOW", sub: "Live pickup game lobbies", icon: Gamepad2, path: "/app/play-now", cursor: "JOIN", accent: true },
     { label: "FIND PLAYERS", sub: "Match by sport & skill", icon: Users, path: "/app/find-players", cursor: "FIND", accent: false },
     { label: "TOURNAMENTS", sub: "Brackets & podiums", icon: Trophy, path: "/app/tournaments", cursor: "COMPETE", accent: false },
+    { label: "INJURY RISK", sub: "AI injury prevention", icon: ShieldAlert, path: "/app/injury-risk", cursor: "ANALYSE", accent: false },
   ];
+
 
   return (
     <div className="space-y-10 pb-16">

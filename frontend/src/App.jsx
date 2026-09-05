@@ -26,6 +26,7 @@ import { TrainingPage } from './pages/TrainingPage';
 import { PerformancePage } from './pages/PerformancePage';
 import { AwardsPage } from './pages/AwardsPage';
 import { MyStatsPage } from './pages/MyStatsPage';
+import { InjuryRiskPage } from './pages/InjuryRiskPage';
 
 // Coach Pages
 import { CoachDashboardPage } from './pages/CoachDashboardPage';
@@ -121,6 +122,7 @@ export default function App() {
                   <Route path="my-bookings" element={<BookingsPage />} />
                   <Route path="notifications" element={<NotificationsPage />} />
                   <Route path="profile" element={<ProfilePage />} />
+                  <Route path="injury-risk" element={<InjuryRiskPage />} />
                 </Routes>
               </MainLayout>
             </ProtectedRoute>
