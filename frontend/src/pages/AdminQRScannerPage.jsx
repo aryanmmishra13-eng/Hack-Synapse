@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   QrCode, Camera, CheckCircle2, XCircle, AlertTriangle, ShieldCheck, 
-  Clock, User, Building2, Package, RefreshCw, ArrowRight, History, Zap
+  Clock, User, Building2, Package, RefreshCw, ArrowRight, History, Zap,
+  Upload, Sparkles
 } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 import api from '../services/api';
@@ -16,16 +17,31 @@ export const AdminQRScannerPage = () => {
   const [history, setHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [cameraError, setCameraError] = useState(null);
+  const [cameraDevices, setCameraDevices] = useState([]);
+  const [selectedCamera, setSelectedCamera] = useState('');
 
-  const scannerRef = useRef(null);
   const html5QrCodeRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     fetchHistory();
+    checkCameras();
     return () => {
       stopCameraScanner();
     };
   }, []);
+
+  const checkCameras = async () => {
+    try {
+      const devices = await Html5Qrcode.getCameras();
+      if (devices && devices.length > 0) {
+        setCameraDevices(devices);
+        setSelectedCamera(devices[0].id);
+      }
+    } catch (e) {
+      console.log('Camera enumeration notice:', e);
+    }
+  };
 
   const fetchHistory = async () => {
     setLoadingHistory(true);
@@ -42,36 +58,75 @@ export const AdminQRScannerPage = () => {
   const startCameraScanner = async () => {
     setCameraError(null);
     setScanning(true);
+
     try {
+      // Clean previous instance
+      if (html5QrCodeRef.current) {
+        try {
+          await html5QrCodeRef.current.stop();
+        } catch (e) {}
+      }
+
       const html5QrCode = new Html5Qrcode("reader");
       html5QrCodeRef.current = html5QrCode;
 
+      // Determine camera target (selected cameraId or facingMode)
+      let cameraConfig = { facingMode: "environment" };
+      try {
+        const devices = await Html5Qrcode.getCameras();
+        if (devices && devices.length > 0) {
+          setCameraDevices(devices);
+          cameraConfig = selectedCamera || devices[0].id;
+        }
+      } catch (camErr) {
+        cameraConfig = { facingMode: "user" };
+      }
+
       await html5QrCode.start(
-        { facingMode: "environment" },
+        cameraConfig,
         {
           fps: 10,
-          qrbox: { width: 250, height: 250 },
+          qrbox: { width: 220, height: 220 },
+          aspectRatio: 1.0,
         },
         (decodedText) => {
           setQrInput(decodedText);
           stopCameraScanner();
           handleVerify(decodedText);
         },
-        (errorMessage) => {
-          // scanning frame errors can be ignored
+        () => {
+          // ignore scan frame errors
         }
       );
     } catch (err) {
       console.error("Camera scanner error:", err);
-      setCameraError("Camera access denied or unavailable. Please use manual code entry.");
-      setScanning(false);
+      // Fallback try with any camera if environment failed
+      try {
+        const fallbackScanner = new Html5Qrcode("reader");
+        html5QrCodeRef.current = fallbackScanner;
+        await fallbackScanner.start(
+          { facingMode: "user" },
+          { fps: 10, qrbox: { width: 220, height: 220 } },
+          (decodedText) => {
+            setQrInput(decodedText);
+            stopCameraScanner();
+            handleVerify(decodedText);
+          },
+          () => {}
+        );
+      } catch (fallbackErr) {
+        setCameraError("Camera unavailable or permission denied. You can upload a QR image or enter the code manually below.");
+        setScanning(false);
+      }
     }
   };
 
   const stopCameraScanner = async () => {
-    if (html5QrCodeRef.current && html5QrCodeRef.current.isScanning) {
+    if (html5QrCodeRef.current) {
       try {
-        await html5QrCodeRef.current.stop();
+        if (html5QrCodeRef.current.isScanning) {
+          await html5QrCodeRef.current.stop();
+        }
         await html5QrCodeRef.current.clear();
       } catch (e) {
         console.error("Error stopping camera:", e);
@@ -80,9 +135,28 @@ export const AdminQRScannerPage = () => {
     setScanning(false);
   };
 
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setCameraError(null);
+    try {
+      const html5QrCode = new Html5Qrcode("reader-hidden");
+      const decodedText = await html5QrCode.scanFile(file, true);
+      setQrInput(decodedText);
+      handleVerify(decodedText);
+    } catch (err) {
+      setCameraError("Could not detect a valid QR code in the uploaded image. Please try another image or manual input.");
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
+
   const handleVerify = async (codeToVerify) => {
     const target = codeToVerify || qrInput;
-    if (!target.trim()) return;
+    if (!target || !target.trim()) return;
 
     setVerifying(true);
     setVerificationResult(null);
@@ -95,7 +169,7 @@ export const AdminQRScannerPage = () => {
       setVerificationResult({
         valid: false,
         can_approve: false,
-        message: err.response?.data?.detail || "Network error verifying QR pass."
+        message: err.response?.data?.detail || "Error connecting to pass validation API."
       });
     } finally {
       setVerifying(false);
@@ -131,6 +205,16 @@ export const AdminQRScannerPage = () => {
 
   return (
     <div className="space-y-8 pb-16">
+      {/* Hidden container for file scanning */}
+      <div id="reader-hidden" className="hidden"></div>
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        accept="image/*" 
+        onChange={handleFileUpload} 
+        className="hidden" 
+      />
+
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-white/10 pb-6">
         <div>
@@ -176,52 +260,86 @@ export const AdminQRScannerPage = () => {
 
             {/* Camera Viewport */}
             <div className="space-y-3">
-              <div 
-                id="reader" 
-                className={`w-full overflow-hidden bg-black border ${scanning ? 'border-[#FF4D00]' : 'border-white/10'} rounded-none min-h-[160px] flex items-center justify-center`}
-              >
+              <div className="relative">
+                <div 
+                  id="reader" 
+                  className={`w-full overflow-hidden bg-black border ${scanning ? 'border-[#FF4D00]' : 'border-white/10'} min-h-[220px]`}
+                ></div>
+
                 {!scanning && (
-                  <div className="text-center p-8 space-y-3">
-                    <Camera className="w-10 h-10 text-[#888880] mx-auto opacity-50" />
-                    <p className="text-xs font-mono text-[#888880] uppercase">
-                      WEBCAM SCANNER READY
-                    </p>
+                  <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center p-6 text-center space-y-3 border border-white/10">
+                    <div className="w-12 h-12 bg-white/5 border border-white/10 flex items-center justify-center text-[#FF4D00]">
+                      <Camera className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-mono text-white uppercase font-bold">
+                        WEBCAM SCANNER READY
+                      </p>
+                      <p className="text-[11px] text-[#888880] mt-1 font-sans">
+                        Scan student pass directly using camera or upload a QR image
+                      </p>
+                    </div>
                   </div>
                 )}
               </div>
 
+              {cameraDevices.length > 1 && scanning && (
+                <div className="flex items-center gap-2 text-xs font-mono text-[#888880]">
+                  <span>CAMERA:</span>
+                  <select
+                    value={selectedCamera}
+                    onChange={(e) => setSelectedCamera(e.target.value)}
+                    className="bg-[#111111] border border-white/10 text-white px-2 py-1 text-xs"
+                  >
+                    {cameraDevices.map((cam) => (
+                      <option key={cam.id} value={cam.id}>
+                        {cam.label || `Camera ${cam.id.slice(0, 5)}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {cameraError && (
-                <div className="p-3 bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-mono flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-mono flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{cameraError}</span>
                 </div>
               )}
 
-              <div className="flex gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 {!scanning ? (
                   <button
                     onClick={startCameraScanner}
-                    className="flex-1 py-3 px-4 bg-[#FF4D00] hover:bg-[#ff6524] text-black font-mono font-bold text-xs uppercase flex items-center justify-center gap-2 transition-colors"
+                    className="py-3 px-4 bg-[#FF4D00] hover:bg-[#ff6524] text-black font-mono font-bold text-xs uppercase flex items-center justify-center gap-2 transition-colors shadow-lg shadow-[#FF4D00]/20"
                   >
                     <Camera className="w-4 h-4" />
-                    <span>LAUNCH CAMERA SCANNER</span>
+                    <span>LAUNCH CAMERA</span>
                   </button>
                 ) : (
                   <button
                     onClick={stopCameraScanner}
-                    className="flex-1 py-3 px-4 bg-rose-600 hover:bg-rose-700 text-white font-mono font-bold text-xs uppercase flex items-center justify-center gap-2 transition-colors"
+                    className="py-3 px-4 bg-rose-600 hover:bg-rose-700 text-white font-mono font-bold text-xs uppercase flex items-center justify-center gap-2 transition-colors"
                   >
                     <XCircle className="w-4 h-4" />
                     <span>STOP CAMERA</span>
                   </button>
                 )}
+
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="py-3 px-4 bg-[#1a1a1a] hover:bg-[#222] border border-white/20 text-white font-mono font-bold text-xs uppercase flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Upload className="w-4 h-4 text-[#FF4D00]" />
+                  <span>UPLOAD QR IMAGE</span>
+                </button>
               </div>
             </div>
 
             {/* Manual Code Input Form */}
             <div className="pt-4 border-t border-white/10 space-y-3">
               <label className="block text-xs font-mono uppercase text-[#888880]">
-                OR MANUAL / HARDWARE SCANNER INPUT:
+                OR MANUAL PASS IDENTIFIER / BOOKING ID:
               </label>
               <div className="flex gap-2">
                 <input
@@ -425,7 +543,7 @@ export const AdminQRScannerPage = () => {
                       <button
                         onClick={handleApprove}
                         disabled={approving}
-                        className="w-full py-4 bg-emerald-500 hover:bg-emerald-400 text-black font-mono font-bold text-sm uppercase flex items-center justify-center gap-2 transition-colors"
+                        className="w-full py-4 bg-emerald-500 hover:bg-emerald-400 text-black font-mono font-bold text-sm uppercase flex items-center justify-center gap-2 transition-colors shadow-lg shadow-emerald-500/20"
                       >
                         {approving ? (
                           <RefreshCw className="w-4 h-4 animate-spin" />
