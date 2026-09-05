@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import { 
   Home, Activity, CalendarCheck, Users, Gamepad2, Bell, User, 
   LayoutDashboard, Building2, BarChart3, Sliders, Wrench, Sparkles,
-  Trophy, Package, TrendingUp, Medal, FileText, Flame, ClipboardList, Award
+  Trophy, Package, TrendingUp, Medal, FileText, Flame, ClipboardList, Award, QrCode
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -37,6 +37,7 @@ export const Sidebar = () => {
 
   const adminLinks = [
     { to: '/admin', label: 'OPERATIONS DASHBOARD', icon: LayoutDashboard, end: true },
+    { to: '/admin/qr-scanner', label: 'QR GATE SCANNER', icon: QrCode, badge: 'GATE' },
     { to: '/admin/equipment', label: 'EQUIPMENT INVENTORY', icon: Package, badge: 'GEAR' },
     { to: '/admin/tournaments', label: 'TOURNAMENTS & BRACKETS', icon: Trophy },
     { to: '/admin/coaches', label: 'COACH MANAGEMENT', icon: Award },

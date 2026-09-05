@@ -46,6 +46,7 @@ import { AdminTournamentsPage } from './pages/AdminTournamentsPage';
 import { AdminCoachesPage } from './pages/AdminCoachesPage';
 import { AdminStudentReportsPage } from './pages/AdminStudentReportsPage';
 import { AdminSportsOverviewPage } from './pages/AdminSportsOverviewPage';
+import { AdminQRScannerPage } from './pages/AdminQRScannerPage';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user, loading } = useAuth();
@@ -161,6 +162,7 @@ export default function App() {
                   <Route path="occupancy" element={<AdminOccupancyPage />} />
                   <Route path="analytics" element={<AdminAnalyticsPage />} />
                   <Route path="simulator" element={<AdminSimulatorPage />} />
+                  <Route path="qr-scanner" element={<AdminQRScannerPage />} />
                   <Route path="allocation" element={<AdminAllocationPage />} />
                   <Route path="maintenance" element={<AdminMaintenancePage />} />
                 </Routes>

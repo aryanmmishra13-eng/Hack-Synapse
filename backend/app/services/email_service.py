@@ -32,41 +32,52 @@ from email.mime.text import MIMEText
 
 logger = logging.getLogger(__name__)
 
-# App Name
-APP_NAME = os.getenv("APP_NAME", "Campus Sports Hub")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "noreply@campussportshub.edu")
-
-# Brevo Configuration (Primary)
-BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
-BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", os.getenv("FROM_EMAIL", "aryanmmishra13@gmail.com"))
-BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", APP_NAME)
-
-# Resend Configuration (Alternative)
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-RESEND_FROM = os.getenv("RESEND_FROM", f"{APP_NAME} <onboarding@resend.dev>")
-
-# SMTP Configuration (Fallback / Brevo SMTP Relay)
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
+def _get_config():
+    app_name = os.getenv("BREVO_SENDER_NAME", os.getenv("APP_NAME", "SportSense"))
+    brevo_key = os.getenv("BREVO_API_KEY", "")
+    brevo_sender_email = os.getenv("BREVO_SENDER_EMAIL", os.getenv("FROM_EMAIL", "generalmailer7@gmail.com"))
+    brevo_sender_name = os.getenv("BREVO_SENDER_NAME", app_name)
+    
+    resend_key = os.getenv("RESEND_API_KEY", "")
+    resend_from = os.getenv("RESEND_FROM", f"{app_name} <onboarding@resend.dev>")
+    
+    smtp_host = os.getenv("SMTP_HOST", "")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "")
+    smtp_pass = os.getenv("SMTP_PASS", "")
+    from_email = os.getenv("FROM_EMAIL", "noreply@campussportshub.edu")
+    
+    return {
+        "app_name": app_name,
+        "brevo_key": brevo_key,
+        "brevo_sender_email": brevo_sender_email,
+        "brevo_sender_name": brevo_sender_name,
+        "resend_key": resend_key,
+        "resend_from": resend_from,
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "smtp_user": smtp_user,
+        "smtp_pass": smtp_pass,
+        "from_email": from_email
+    }
 
 
 def _send_brevo(to_email: str, subject: str, html_body: str) -> bool:
     """Send transactional email via Brevo REST API v3."""
-    if not BREVO_API_KEY:
+    cfg = _get_config()
+    if not cfg["brevo_key"]:
         return False
     try:
         url = "https://api.brevo.com/v3/smtp/email"
         headers = {
-            "api-key": BREVO_API_KEY,
+            "api-key": cfg["brevo_key"],
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
         payload = {
             "sender": {
-                "name": BREVO_SENDER_NAME,
-                "email": BREVO_SENDER_EMAIL
+                "name": cfg["brevo_sender_name"],
+                "email": cfg["brevo_sender_email"]
             },
             "to": [
                 {
@@ -103,14 +114,15 @@ def _send_brevo(to_email: str, subject: str, html_body: str) -> bool:
 
 def _send_resend(to_email: str, subject: str, html_body: str) -> bool:
     """Attempt to send email via Resend API."""
-    if not RESEND_API_KEY:
+    cfg = _get_config()
+    if not cfg["resend_key"]:
         return False
     try:
         try:
             import resend
-            resend.api_key = RESEND_API_KEY
+            resend.api_key = cfg["resend_key"]
             r = resend.Emails.send({
-                "from": RESEND_FROM,
+                "from": cfg["resend_from"],
                 "to": [to_email],
                 "subject": subject,
                 "html": html_body
@@ -121,11 +133,11 @@ def _send_resend(to_email: str, subject: str, html_body: str) -> bool:
         except ImportError:
             import httpx
             headers = {
-                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Authorization": f"Bearer {cfg['resend_key']}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "from": RESEND_FROM,
+                "from": cfg["resend_from"],
                 "to": [to_email],
                 "subject": subject,
                 "html": html_body
@@ -144,18 +156,21 @@ def _send_resend(to_email: str, subject: str, html_body: str) -> bool:
 
 def _send_smtp(to_email: str, subject: str, html_body: str) -> bool:
     """Attempt to send via SMTP / Brevo SMTP Relay. Returns True on success."""
+    cfg = _get_config()
+    if not (cfg["smtp_host"] and cfg["smtp_user"] and cfg["smtp_pass"]):
+        return False
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
-        msg["From"] = f"{APP_NAME} <{FROM_EMAIL}>"
+        msg["From"] = f"{cfg['app_name']} <{cfg['from_email']}>"
         msg["To"] = to_email
         msg.attach(MIMEText(html_body, "html"))
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=8) as server:
+        with smtplib.SMTP(cfg["smtp_host"], cfg["smtp_port"], timeout=8) as server:
             server.ehlo()
             server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(FROM_EMAIL, to_email, msg.as_string())
+            server.login(cfg["smtp_user"], cfg["smtp_pass"])
+            server.sendmail(cfg["from_email"], to_email, msg.as_string())
         logger.info(f"[EmailService/SMTP] Email sent to {to_email}: {subject}")
         return True
     except Exception as exc:
@@ -165,20 +180,21 @@ def _send_smtp(to_email: str, subject: str, html_body: str) -> bool:
 
 def _dispatch(to_email: str, subject: str, html_body: str):
     """Send via Brevo if configured, else Resend, else SMTP, else console."""
+    cfg = _get_config()
     # 1. Primary: Brevo API
-    if BREVO_API_KEY:
+    if cfg["brevo_key"]:
         if _send_brevo(to_email, subject, html_body):
             return
         logger.warning(f"[EmailService] Brevo delivery failed for {to_email}, trying next provider...")
 
     # 2. Secondary: Resend API
-    if RESEND_API_KEY:
+    if cfg["resend_key"]:
         if _send_resend(to_email, subject, html_body):
             return
         logger.warning(f"[EmailService] Resend delivery failed for {to_email}, trying SMTP fallback...")
 
     # 3. Fallback: SMTP / Brevo SMTP Relay
-    if SMTP_HOST and SMTP_USER and SMTP_PASS:
+    if cfg["smtp_host"] and cfg["smtp_user"] and cfg["smtp_pass"]:
         if _send_smtp(to_email, subject, html_body):
             return
         logger.warning(f"[EmailService] SMTP delivery failed for {to_email}, falling back to console.")

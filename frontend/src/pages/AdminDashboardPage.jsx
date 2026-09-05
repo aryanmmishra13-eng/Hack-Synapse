@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   Building2, CalendarCheck, CheckCircle2, AlertTriangle, Users, 
-  BarChart3, Sparkles, Sliders, Wrench, ChevronRight, ArrowUpRight, Shield, Activity
+  BarChart3, Sparkles, Sliders, Wrench, ChevronRight, ArrowUpRight, Shield, Activity, QrCode
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import api from '../services/api';
@@ -110,6 +110,35 @@ export const AdminDashboardPage = () => {
         </div>
 
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          <Link
+            to="/admin/qr-scanner"
+            data-cursor="SCANNER"
+            className="card-panel p-6 flex flex-col justify-between hover:border-[#FF4D00] transition-all space-y-4 group bg-gradient-to-br from-[#161616] to-[#0d0d0d]"
+          >
+            <div className="space-y-3">
+              <div className="w-12 h-12 border border-[#FF4D00]/40 bg-black flex items-center justify-center text-[#FF4D00] group-hover:bg-[#FF4D00] group-hover:text-black transition-colors">
+                <QrCode className="w-6 h-6" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-2xl font-display font-bold uppercase tracking-tight text-white group-hover:text-[#FF4D00] transition-colors">
+                    QR GATE SCANNER
+                  </h3>
+                  <span className="text-[9px] font-mono px-1.5 py-0.5 bg-[#FF4D00]/10 text-[#FF4D00] border border-[#FF4D00]/30 uppercase">
+                    SECURITY
+                  </span>
+                </div>
+                <p className="text-xs font-mono text-muted mt-1 leading-relaxed">
+                  Real-time webcam barcode scanner &amp; pass validator to authenticate student entrance &amp; gear release.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between pt-3 border-t border-white/10 text-xs font-mono font-bold uppercase text-[#FF4D00]">
+              <span>LAUNCH SCANNER</span>
+              <ArrowUpRight className="w-4 h-4 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+            </div>
+          </Link>
+
           <Link
             to="/admin/occupancy"
             data-cursor="MONITOR"
