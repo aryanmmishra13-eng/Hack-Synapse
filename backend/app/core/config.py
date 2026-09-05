@@ -1,5 +1,12 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# Load .env from backend/ or root project dir
+load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[3] / ".env")
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Campus Sports Hub API"
@@ -9,7 +16,7 @@ class Settings(BaseSettings):
     
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL", 
-        "sqlite:///C:/Users/aryan/.gemini/antigravity/scratch/campus-sports-hub/backend/campus_sports.db"
+        "postgresql://campus_user:campus_pass@localhost:5432/campus_sports_db"
     )
 
     class Config:

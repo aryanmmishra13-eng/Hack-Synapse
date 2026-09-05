@@ -9,4 +9,13 @@ services:
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
-        value: sqlite:///./campus_sports.db
+        fromDatabase:
+          name: campus-sports-db
+          property: connectionString
+
+databases:
+  - name: campus-sports-db
+    databaseName: campus_sports_db
+    user: campus_user
+    region: oregon
+    plan: free

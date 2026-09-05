@@ -467,8 +467,8 @@ def get_checkin_history(
     bookings = (
         db.query(Booking)
         .filter(Booking.status == BookingStatusEnum.CHECKED_IN.value)
-        .order_by(Booking.checked_in_at.desc())
-        .limit(40)
+        .order_by(Booking.checked_in_at.desc().nullslast(), Booking.id.desc())
+        .limit(50)
         .all()
     )
 

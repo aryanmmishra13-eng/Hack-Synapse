@@ -39,7 +39,7 @@ Campus Sports Hub is a modern, intelligent college sports facility management an
 - **Frontend**: React 18, Vite, Tailwind CSS, Lucide Icons, Recharts, Axios, React Router v6.
 - **Backend**: Python 3.13, FastAPI, Uvicorn, SQLAlchemy ORM, Pydantic v2, PyJWT, Bcrypt.
 - **Machine Learning**: scikit-learn (`HistGradientBoostingRegressor`), pandas, NumPy, joblib.
-- **Database**: SQLite (local development fallback) / PostgreSQL production ready.
+- **Database**: PostgreSQL (with SQLAlchemy 2.0 ORM & psycopg2 connection pooling).
 
 ---
 
