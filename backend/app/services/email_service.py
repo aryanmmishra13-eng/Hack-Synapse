@@ -1,37 +1,149 @@
 """
 Email Notification Service for Campus Sports Hub.
 
-Sends HTML emails for key auth and booking events.
-Configure SMTP via environment variables:
-  SMTP_HOST   - e.g. smtp.gmail.com
-  SMTP_PORT   - e.g. 587
-  SMTP_USER   - sender email / username
-  SMTP_PASS   - app password / SMTP password
-  FROM_EMAIL  - displayed sender address
+Sends rich HTML transactional emails for key auth and booking events.
+Primary provider: Brevo (formerly Sendinblue - https://brevo.com)
+Secondary providers: Resend, SMTP (Brevo/Gmail Relay), Console logger (dev mode)
 
-When SMTP credentials are NOT set, emails are printed to the console
-(dev/hackathon mode) so no notifications are silently dropped.
+Configure via environment variables:
+  BREVO_API_KEY       - Brevo API Key (e.g. xkeysib-...)
+  BREVO_SENDER_EMAIL  - Brevo verified sender email (default: FROM_EMAIL or "noreply@campussportshub.edu")
+  BREVO_SENDER_NAME   - Sender name (default: "Campus Sports Hub")
+
+  RESEND_API_KEY      - Resend API Key (fallback)
+  RESEND_FROM         - Resend sender (fallback)
+  
+  SMTP_HOST           - e.g. smtp-relay.brevo.com or smtp.gmail.com (fallback)
+  SMTP_PORT           - e.g. 587
+  SMTP_USER           - Brevo/Gmail login username
+  SMTP_PASS           - Brevo/Gmail SMTP key or app password
+  FROM_EMAIL          - displayed sender address
 """
 
 import os
 import smtplib
 import logging
 import re
+import json
+import urllib.request
+import urllib.error
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 logger = logging.getLogger(__name__)
 
+# App Name
+APP_NAME = os.getenv("APP_NAME", "Campus Sports Hub")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "noreply@campussportshub.edu")
+
+# Brevo Configuration (Primary)
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", os.getenv("FROM_EMAIL", "aryanmmishra13@gmail.com"))
+BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", APP_NAME)
+
+# Resend Configuration (Alternative)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM = os.getenv("RESEND_FROM", f"{APP_NAME} <onboarding@resend.dev>")
+
+# SMTP Configuration (Fallback / Brevo SMTP Relay)
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "noreply@campussportshub.edu")
-APP_NAME = "Campus Sports Hub"
+
+
+def _send_brevo(to_email: str, subject: str, html_body: str) -> bool:
+    """Send transactional email via Brevo REST API v3."""
+    if not BREVO_API_KEY:
+        return False
+    try:
+        url = "https://api.brevo.com/v3/smtp/email"
+        headers = {
+            "api-key": BREVO_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        payload = {
+            "sender": {
+                "name": BREVO_SENDER_NAME,
+                "email": BREVO_SENDER_EMAIL
+            },
+            "to": [
+                {
+                    "email": to_email
+                }
+            ],
+            "subject": subject,
+            "htmlContent": html_body
+        }
+
+        # Try with httpx if available, fallback to urllib
+        try:
+            import httpx
+            resp = httpx.post(url, json=payload, headers=headers, timeout=10.0)
+            if resp.status_code in (200, 201):
+                msg_id = resp.json().get("messageId", "sent")
+                logger.info(f"[EmailService/Brevo] Email sent to {to_email}: {subject} (MessageId: {msg_id})")
+                return True
+            else:
+                logger.warning(f"[EmailService/Brevo] API returned status {resp.status_code}: {resp.text}")
+                return False
+        except ImportError:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status in (200, 201):
+                    logger.info(f"[EmailService/Brevo] Email sent to {to_email}: {subject}")
+                    return True
+                return False
+    except Exception as exc:
+        logger.warning(f"[EmailService/Brevo] Send failed to {to_email}: {exc}")
+        return False
+
+
+def _send_resend(to_email: str, subject: str, html_body: str) -> bool:
+    """Attempt to send email via Resend API."""
+    if not RESEND_API_KEY:
+        return False
+    try:
+        try:
+            import resend
+            resend.api_key = RESEND_API_KEY
+            r = resend.Emails.send({
+                "from": RESEND_FROM,
+                "to": [to_email],
+                "subject": subject,
+                "html": html_body
+            })
+            email_id = r.get("id") if isinstance(r, dict) else getattr(r, "id", "sent")
+            logger.info(f"[EmailService/Resend] Email sent to {to_email}: {subject} (ID: {email_id})")
+            return True
+        except ImportError:
+            import httpx
+            headers = {
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "from": RESEND_FROM,
+                "to": [to_email],
+                "subject": subject,
+                "html": html_body
+            }
+            resp = httpx.post("https://api.resend.com/emails", json=payload, headers=headers, timeout=10.0)
+            if resp.status_code in (200, 201):
+                logger.info(f"[EmailService/Resend] HTTP Email sent to {to_email}: {subject}")
+                return True
+            else:
+                logger.warning(f"[EmailService/Resend] API returned status {resp.status_code}: {resp.text}")
+                return False
+    except Exception as exc:
+        logger.warning(f"[EmailService/Resend] Send failed to {to_email}: {exc}")
+        return False
 
 
 def _send_smtp(to_email: str, subject: str, html_body: str) -> bool:
-    """Attempt to send via SMTP. Returns True on success."""
+    """Attempt to send via SMTP / Brevo SMTP Relay. Returns True on success."""
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -44,29 +156,44 @@ def _send_smtp(to_email: str, subject: str, html_body: str) -> bool:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(FROM_EMAIL, to_email, msg.as_string())
-        logger.info(f"[EmailService] Email sent to {to_email}: {subject}")
+        logger.info(f"[EmailService/SMTP] Email sent to {to_email}: {subject}")
         return True
     except Exception as exc:
-        logger.warning(f"[EmailService] SMTP send failed to {to_email}: {exc}")
+        logger.warning(f"[EmailService/SMTP] SMTP send failed to {to_email}: {exc}")
         return False
 
 
 def _dispatch(to_email: str, subject: str, html_body: str):
-    """Send via SMTP if configured, otherwise log to console (dev mode)."""
+    """Send via Brevo if configured, else Resend, else SMTP, else console."""
+    # 1. Primary: Brevo API
+    if BREVO_API_KEY:
+        if _send_brevo(to_email, subject, html_body):
+            return
+        logger.warning(f"[EmailService] Brevo delivery failed for {to_email}, trying next provider...")
+
+    # 2. Secondary: Resend API
+    if RESEND_API_KEY:
+        if _send_resend(to_email, subject, html_body):
+            return
+        logger.warning(f"[EmailService] Resend delivery failed for {to_email}, trying SMTP fallback...")
+
+    # 3. Fallback: SMTP / Brevo SMTP Relay
     if SMTP_HOST and SMTP_USER and SMTP_PASS:
-        _send_smtp(to_email, subject, html_body)
-    else:
-        text = re.sub(r"<[^>]+>", "", html_body)
-        text = re.sub(r"&[a-zA-Z0-9#]+;", " ", text)   # strip HTML entities
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        # Safe console print (handles Windows cp1252 limitations)
-        safe_subject = subject.encode("ascii", errors="replace").decode("ascii")
-        safe_text = text.encode("ascii", errors="replace").decode("ascii")
-        print("\n" + "=" * 72)
-        print(f"[DEV EMAIL] To      : {to_email}")
-        print(f"[DEV EMAIL] Subject : {safe_subject}")
-        print(f"[DEV EMAIL] Body    :\n{safe_text[:1500]}")
-        print("=" * 72 + "\n")
+        if _send_smtp(to_email, subject, html_body):
+            return
+        logger.warning(f"[EmailService] SMTP delivery failed for {to_email}, falling back to console.")
+
+    # 4. Development / Fallback Console Logger
+    text = re.sub(r"<[^>]+>", "", html_body)
+    text = re.sub(r"&[a-zA-Z0-9#]+;", " ", text)   # strip HTML entities
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    safe_subject = subject.encode("ascii", errors="replace").decode("ascii")
+    safe_text = text.encode("ascii", errors="replace").decode("ascii")
+    print("\n" + "=" * 72)
+    print(f"[DEV EMAIL] To      : {to_email}")
+    print(f"[DEV EMAIL] Subject : {safe_subject}")
+    print(f"[DEV EMAIL] Body    :\n{safe_text[:1500]}")
+    print("=" * 72 + "\n")
 
 
 def _base_template(title: str, preheader: str, body_html: str) -> str:
