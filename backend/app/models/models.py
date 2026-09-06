@@ -490,20 +490,66 @@ class AllocationPolicy(Base):
     peak_weight = Column(Float, default=0.20)
     noshow_weight = Column(Float, default=0.20)
 
-# --- ML Injury Predictions ---
+# --- ML Injury Predictions (spec §10) ---
 class InjuryPrediction(Base):
     __tablename__ = "injury_predictions"
 
     id = Column(Integer, primary_key=True, index=True)
+    # Athlete reference — reuses existing users.id (spec §10: reuse athlete/user tables)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    risk_score = Column(Float, nullable=False)           # 0.0 – 1.0
+
+    # Risk output
+    risk_score = Column(Float, nullable=False)           # 0.0 – 100.0 percentage
     risk_level = Column(String(20), nullable=False)      # LOW / MEDIUM / HIGH
-    predicted_injury = Column(String(100), nullable=True)
-    confidence = Column(Float, nullable=True)
-    top_factors = Column(Text, nullable=True)            # JSON string
-    recommendations = Column(Text, nullable=True)        # JSON string
-    features_used = Column(Text, nullable=True)          # JSON string of 67 features
-    ml_raw_response = Column(Text, nullable=True)        # full API response JSON
+    is_at_risk = Column(Boolean, default=False)          # model threshold decision
+
+    # Regression outputs
+    predicted_onset_days = Column(Float, nullable=True)     # days until likely onset
+    predicted_recovery_days = Column(Float, nullable=True)  # estimated recovery days
+
+    # SHAP factor lists (stored as JSON arrays)
+    increasing_factors = Column(Text, nullable=True)     # [{name, impact}, ...] increases risk
+    reducing_factors = Column(Text, nullable=True)       # [{name, impact}, ...] reduces risk
+
+    # Metadata
+    model_version = Column(String(20), nullable=True, default="v1.0")
+    data_quality = Column(String(20), nullable=True, default="GOOD")  # GOOD/PARTIAL/INSUFFICIENT
+    missing_feature_count = Column(Integer, nullable=True, default=0)
+    generated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # Raw ML API response (debug only, not exposed to frontend)
+    ml_raw_response = Column(Text, nullable=True)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
+
+# --- 7-Day Athlete Health Logs (wearable / manual entry) ---
+class AthleteHealthLog(Base):
+    __tablename__ = "athlete_health_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    log_date = Column(String(12), nullable=False)        # YYYY-MM-DD
+
+    # Heart rate — JSON list of {hour: int, bpm: int} entries (only active hours)
+    heart_rate_entries = Column(Text, nullable=True)     # [{"hour":7,"bpm":142}, ...]
+    resting_hr = Column(Float, nullable=True)            # bpm
+    max_hr = Column(Float, nullable=True)                # bpm
+
+    # Steps — JSON list of {hour: int, steps: int} entries
+    steps_entries = Column(Text, nullable=True)          # [{"hour":8,"steps":1200}, ...]
+    total_steps = Column(Integer, nullable=True)
+
+    # Calories
+    calories_burned = Column(Float, nullable=True)
+
+    # Sleep
+    sleep_hours = Column(Float, nullable=True)
+    sleep_quality = Column(Float, nullable=True)         # 1–10
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", foreign_keys=[user_id])
+

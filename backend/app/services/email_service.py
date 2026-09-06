@@ -32,6 +32,9 @@ from email.mime.text import MIMEText
 
 logger = logging.getLogger(__name__)
 
+# Module-level constant so f-strings in email functions can reference APP_NAME
+APP_NAME: str = os.getenv("BREVO_SENDER_NAME", os.getenv("APP_NAME", "SportSense"))
+
 def _get_config():
     app_name = os.getenv("BREVO_SENDER_NAME", os.getenv("APP_NAME", "SportSense"))
     brevo_key = os.getenv("BREVO_API_KEY", "")
@@ -213,6 +216,8 @@ def _dispatch(to_email: str, subject: str, html_body: str):
 
 
 def _base_template(title: str, preheader: str, body_html: str) -> str:
+    # Read APP_NAME locally to avoid NameError in f-string (was referencing undefined global)
+    _app_name = _get_config().get("app_name", "SportSense")
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -227,16 +232,16 @@ def _base_template(title: str, preheader: str, body_html: str) -> str:
              style="background:#1e293b;border-radius:16px;overflow:hidden;border:1px solid #334155;">
         <tr>
           <td style="background:linear-gradient(135deg,#10b981,#0ea5e9);padding:28px 32px;text-align:center;">
-            <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">🏆 {APP_NAME}</h1>
+            <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">&#127942; {_app_name}</h1>
             <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:11px;
-                      letter-spacing:1px;text-transform:uppercase;">BOOK · PLAY · TRAIN · WIN</p>
+                      letter-spacing:1px;text-transform:uppercase;">BOOK &middot; PLAY &middot; TRAIN &middot; WIN</p>
           </td>
         </tr>
         <tr><td style="padding:32px;">{body_html}</td></tr>
         <tr>
           <td style="background:#0f172a;padding:20px 32px;text-align:center;border-top:1px solid #334155;">
             <p style="margin:0;color:#64748b;font-size:11px;">
-              Automated message from {APP_NAME}. Do not reply.
+              Automated message from {_app_name}. Do not reply.
             </p>
           </td>
         </tr>

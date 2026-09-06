@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   Building2, CalendarCheck, CheckCircle2, AlertTriangle, Users, 
-  BarChart3, Sparkles, Sliders, Wrench, ChevronRight, ArrowUpRight, Shield, Activity, QrCode
+  BarChart3, Sparkles, Sliders, Wrench, ChevronRight, ArrowUpRight, Shield, Activity, QrCode,
+  Brain, Zap, ShieldAlert, TrendingUp, WifiOff, Wifi, RefreshCw
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import api from '../services/api';
@@ -11,9 +12,12 @@ import { DemandBar } from '../components/DemandBar';
 export const AdminDashboardPage = () => {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [mlStatus, setMlStatus] = useState(null);
+  const [mlLoading, setMlLoading] = useState(true);
 
   useEffect(() => {
     fetchStats();
+    fetchMlStatus();
   }, []);
 
   const fetchStats = async () => {
@@ -24,6 +28,18 @@ export const AdminDashboardPage = () => {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchMlStatus = async () => {
+    setMlLoading(true);
+    try {
+      const res = await api.get('/predictions/ml-status');
+      setMlStatus(res.data);
+    } catch (err) {
+      console.error('ML status fetch failed', err);
+    } finally {
+      setMlLoading(false);
     }
   };
 
@@ -212,6 +228,172 @@ export const AdminDashboardPage = () => {
           </Link>
         </div>
       </div>
+
+      {/* ── ML Injury Prediction Monitoring (spec §27) ── */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.2 }}
+        className="space-y-4"
+      >
+        <div className="flex items-center justify-between border-b border-white/10 pb-3">
+          <div>
+            <div className="flex items-center gap-2 text-primary font-mono text-[10px] uppercase tracking-widest mb-1">
+              <Brain className="w-3.5 h-3.5" />
+              <span>AI INJURY PREDICTION ENGINE</span>
+            </div>
+            <h2 className="font-display font-bold text-xl uppercase tracking-tight text-white">
+              ML MONITORING DASHBOARD
+            </h2>
+          </div>
+          <button
+            onClick={fetchMlStatus}
+            disabled={mlLoading}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-white/10 font-mono text-[10px] text-[#888880] hover:text-white hover:border-white/30 transition-colors"
+          >
+            <RefreshCw className={`w-3 h-3 ${mlLoading ? 'animate-spin' : ''}`} />
+            REFRESH
+          </button>
+        </div>
+
+        {mlLoading ? (
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+            {[1,2,3,4,5].map(n => (
+              <div key={n} className="h-28 card-panel animate-pulse" />
+            ))}
+          </div>
+        ) : mlStatus ? (
+          <>
+            {/* Status Bar */}
+            <div className={`flex items-center gap-3 p-3 border font-mono text-xs ${
+              mlStatus.ml_api?.status === 'ONLINE'
+                ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-400'
+                : 'border-rose-500/20 bg-rose-500/5 text-rose-400'
+            }`}>
+              {mlStatus.ml_api?.status === 'ONLINE'
+                ? <Wifi className="w-3.5 h-3.5 flex-shrink-0" />
+                : <WifiOff className="w-3.5 h-3.5 flex-shrink-0" />
+              }
+              <span className="font-bold tracking-widest uppercase">
+                ML API {mlStatus.ml_api?.status || 'UNKNOWN'}
+              </span>
+              <span className="text-[10px] opacity-60">
+                {mlStatus.ml_api?.status === 'ONLINE'
+                  ? `Model ${mlStatus.model?.version || 'v1.0'} — ${mlStatus.model?.injury_features || 67} features — threshold ${((mlStatus.model?.optimal_threshold || 0.7) * 100).toFixed(0)}%`
+                  : 'Fallback rule engine active — predictions still available'}
+              </span>
+              {!mlStatus.ml_api?.has_api_key && (
+                <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 uppercase tracking-widest">
+                  NO API KEY
+                </span>
+              )}
+            </div>
+
+            {/* Metric cards */}
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+              <div className="card-panel p-5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[9px] text-muted uppercase tracking-widest">API STATUS</span>
+                  {mlStatus.ml_api?.status === 'ONLINE'
+                    ? <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                    : <WifiOff className="w-3.5 h-3.5 text-rose-400" />}
+                </div>
+                <p className={`font-display font-bold text-2xl ${
+                  mlStatus.ml_api?.status === 'ONLINE' ? 'text-emerald-400' : 'text-rose-400'
+                }`}>
+                  {mlStatus.ml_api?.status || '—'}
+                </p>
+                <p className="font-mono text-[9px] text-muted uppercase">RENDER SERVICE</p>
+              </div>
+
+              <div className="card-panel p-5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[9px] text-muted uppercase tracking-widest">MODEL</span>
+                  <Brain className="w-3.5 h-3.5 text-primary" />
+                </div>
+                <p className="font-display font-bold text-2xl text-white">
+                  {mlStatus.model?.version || 'v1.0'}
+                </p>
+                <p className="font-mono text-[9px] text-muted uppercase">{mlStatus.model?.injury_features || 67} FEATURES</p>
+              </div>
+
+              <div className="card-panel p-5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[9px] text-muted uppercase tracking-widest">TOTAL PREDICTIONS</span>
+                  <Zap className="w-3.5 h-3.5 text-primary" />
+                </div>
+                <p className="font-display font-bold text-2xl text-white">
+                  {mlStatus.stats?.total_predictions ?? '—'}
+                </p>
+                <p className="font-mono text-[9px] text-muted uppercase">ALL TIME</p>
+              </div>
+
+              <div className="card-panel p-5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[9px] text-muted uppercase tracking-widest">AT RISK</span>
+                  <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                </div>
+                <p className="font-display font-bold text-2xl text-rose-400">
+                  {mlStatus.stats?.at_risk_predictions ?? '—'}
+                </p>
+                <p className="font-mono text-[9px] text-muted uppercase">HIGH THRESHOLD</p>
+              </div>
+
+              <div className="card-panel p-5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-[9px] text-muted uppercase tracking-widest">AVG RISK</span>
+                  <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
+                </div>
+                <p className="font-display font-bold text-2xl text-amber-400">
+                  {mlStatus.stats?.average_risk_score != null
+                    ? `${Math.round(mlStatus.stats.average_risk_score)}%`
+                    : '—'}
+                </p>
+                <p className="font-mono text-[9px] text-muted uppercase">ACROSS ALL</p>
+              </div>
+            </div>
+
+            {/* Model accuracy metrics */}
+            {mlStatus.model?.metrics && Object.keys(mlStatus.model.metrics).length > 0 && (
+              <div className="card-panel p-5">
+                <p className="font-mono text-[10px] text-muted uppercase tracking-widest mb-3">CLASSIFIER PERFORMANCE METRICS</p>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
+                  {[
+                    { k: 'accuracy',  l: 'Accuracy',  fmt: v => `${(v*100).toFixed(1)}%` },
+                    { k: 'precision', l: 'Precision', fmt: v => `${(v*100).toFixed(1)}%` },
+                    { k: 'recall',    l: 'Recall',    fmt: v => `${(v*100).toFixed(1)}%` },
+                    { k: 'f1',        l: 'F1 Score',  fmt: v => `${(v*100).toFixed(1)}%` },
+                    { k: 'roc_auc',   l: 'ROC-AUC',   fmt: v => v.toFixed(4) },
+                  ].map(({ k, l, fmt }) => (
+                    mlStatus.model.metrics[k] != null && (
+                      <div key={k} className="text-center">
+                        <p className="font-mono text-[9px] text-muted uppercase tracking-widest mb-1">{l}</p>
+                        <p className="font-display font-bold text-lg text-white">
+                          {fmt(mlStatus.model.metrics[k])}
+                        </p>
+                      </div>
+                    )
+                  ))}
+                </div>
+                <p className="font-mono text-[9px] text-[#444] mt-3">
+                  Cache: {mlStatus.stats?.cache_minutes || 60} min · Last prediction: {mlStatus.stats?.last_prediction_at ? new Date(mlStatus.stats.last_prediction_at).toLocaleString('en-IN') : 'None'}
+                </p>
+              </div>
+            )}
+
+            {/* Disclaimer */}
+            <p className="font-mono text-[9px] text-[#444] leading-relaxed">
+              ML predictions are generated by the Athlete Injury Prediction model (Render). API key is stored server-side only and never exposed to the client.
+              Recovery model R² = 0.24 — presented as estimates only.
+            </p>
+          </>
+        ) : (
+          <div className="card-panel p-8 text-center">
+            <WifiOff className="w-6 h-6 text-[#444] mx-auto mb-2" />
+            <p className="font-mono text-xs text-muted">ML status unavailable — check admin authentication</p>
+          </div>
+        )}
+      </motion.div>
 
     </div>
   );

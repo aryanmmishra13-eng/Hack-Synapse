@@ -1,537 +1,483 @@
 """
-Injury ML Service — proxy to the external Athlete Injury Prediction API.
-Builds the 67-feature vector from available student data and handles fallback.
+ML Service Client  (spec Phase 4 / §6, §8, §9, §14)
+=====================================================
+Secure proxy between the existing backend and the Render-hosted
+Athlete Injury Prediction ML API.
+
+Rules
+-----
+- ML_API_KEY lives only here, never in frontend code (spec §15).
+- Returns spec §9 response shape to callers.
+- Handles all ML API errors with clean codes (spec §14).
+- Never logs the API key (spec §29).
+
+ML API Response Shape (already matches spec §9):
+{
+  "success": true,
+  "data": {
+    "athlete_id": "1",
+    "risk": {"score": 86.26, "level": "HIGH", "is_at_risk": true},
+    "prediction": {"onset_days": 3.6, "recovery_days": 8.2},
+    "factors": {
+      "increasing": [{"name": "...", "impact": 1.8474}],
+      "reducing":   [{"name": "...", "impact": -0.6014}]
+    },
+    "model": {"version": "v1.0"}
+  }
+}
 """
 
-import json
-import httpx
+import logging
+import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
+
+import httpx
 
 from app.core.config import settings
+from app.services.feature_service import DataQuality
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Error codes (spec §14)
+# ─────────────────────────────────────────────────────────────────────────────
+class MLError:
+    UNAVAILABLE        = "ML_SERVICE_UNAVAILABLE"
+    TIMEOUT            = "ML_SERVICE_TIMEOUT"
+    INVALID_RESPONSE   = "ML_INVALID_RESPONSE"
+    AUTH_ERROR         = "ML_AUTH_ERROR"
+    INSUFFICIENT_DATA  = "INSUFFICIENT_DATA"
+    ATHLETE_NOT_FOUND  = "ATHLETE_NOT_FOUND"
+    INTERNAL           = "INTERNAL_ERROR"
 
 
-# ──────────────────────────────────────────────────────────────
-# Feature keys expected by the remote model (67 total)
-# We derive what we can from our DB; everything else defaults
-# ──────────────────────────────────────────────────────────────
-FEATURE_KEYS = [
-    # Physical metrics
-    "age", "height_cm", "weight_kg", "bmi",
-    # Training load
-    "training_hours_per_week", "sessions_per_week", "training_intensity",
-    "weeks_of_training", "years_experience",
-    # Recovery & fatigue
-    "sleep_hours", "fatigue_score", "recovery_score", "rest_days_per_week",
-    # Sport encoding
-    "sport_badminton", "sport_football", "sport_basketball",
-    "sport_tennis", "sport_volleyball", "sport_cricket", "sport_gym",
-    # Skill level encoding
-    "skill_beginner", "skill_intermediate", "skill_advanced",
-    # Activity metrics (from our bookings)
-    "bookings_last_30d", "bookings_last_7d", "no_show_rate",
-    "avg_session_duration_min", "checkins_last_30d",
-    # Performance scores (from assessments)
-    "stamina_score", "speed_score", "agility_score",
-    "strength_score", "endurance_score", "flexibility_score",
-    "coordination_score", "balance_score",
-    # Injury history flags
-    "prior_injury_knee", "prior_injury_ankle", "prior_injury_shoulder",
-    "prior_injury_back", "prior_injury_wrist", "prior_injury_count",
-    # Environmental
-    "is_indoor_sport", "plays_outdoor", "temp_celsius",
-    "high_humidity", "plays_rainy_conditions",
-    # Workload ratios
-    "acute_chronic_workload_ratio", "monotony_score", "strain_score",
-    "consecutive_training_days", "days_since_last_rest",
-    # Biomechanics / form flags
-    "poor_landing_technique", "asymmetric_movement", "muscle_imbalance",
-    "joint_hypermobility", "overstriding",
-    # Wellness & nutrition
-    "hydration_score", "nutrition_score", "stress_level",
-    "motivation_level", "pain_score",
-    # Competition
-    "recent_competition", "competition_frequency",
-    "travel_in_last_week", "time_zone_changes",
-    # Context
-    "team_sport", "contact_sport", "high_impact_sport",
-]
-
-# Sport → one-hot key
-SPORT_MAP = {
-    "Badminton":   "sport_badminton",
-    "Football":    "sport_football",
-    "Basketball":  "sport_basketball",
-    "Tennis":      "sport_tennis",
-    "Volleyball":  "sport_volleyball",
-    "Cricket":     "sport_cricket",
-    "Gym":         "sport_gym",
-}
-
-# Sport risk metadata
-SPORT_CONTACT = {"Football", "Basketball", "Cricket", "Volleyball"}
-SPORT_INDOOR = {"Badminton", "Basketball", "Gym", "Tennis"}
-SPORT_HIGH_IMPACT = {"Football", "Basketball", "Cricket"}
+# ─────────────────────────────────────────────────────────────────────────────
+# Risk level thresholds (matching ML model's optimal_threshold = 0.7)
+# ─────────────────────────────────────────────────────────────────────────────
+ML_OPTIMAL_THRESHOLD = 0.70   # from /api/v1/model-info
+MODEL_VERSION        = "v1.0"
 
 
-def _sport_flags(sport: str) -> dict:
-    flags = {k: 0 for k in SPORT_MAP.values()}
-    key = SPORT_MAP.get(sport)
-    if key:
-        flags[key] = 1
-    return flags
+def _score_to_level(score_pct: float) -> Tuple[str, bool]:
+    """Map percentage score to level + is_at_risk."""
+    frac = score_pct / 100.0
+    is_at_risk = frac >= ML_OPTIMAL_THRESHOLD
+    if frac >= 0.65:
+        return "HIGH", is_at_risk
+    elif frac >= 0.35:
+        return "MEDIUM", is_at_risk
+    else:
+        return "LOW", is_at_risk
 
 
-def _skill_flags(skill: str) -> dict:
-    return {
-        "skill_beginner":     1 if skill == "Beginner" else 0,
-        "skill_intermediate": 1 if skill == "Intermediate" else 0,
-        "skill_advanced":     1 if skill == "Advanced" else 0,
-    }
+# ─────────────────────────────────────────────────────────────────────────────
+# Factor parser — handles both ML API native format and raw SHAP
+# ─────────────────────────────────────────────────────────────────────────────
+def _parse_factors(factors_data: dict) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Parse the factors block from ML API response.
+    Input:  {"increasing": [...], "reducing": [...]}
+    Output: (increasing_list, reducing_list)
+    """
+    increasing: List[Dict] = []
+    reducing:   List[Dict] = []
 
-
-def build_feature_vector(
-    *,
-    user_id: int,
-    sport: str = "Badminton",
-    skill_level: str = "Intermediate",
-    bookings_last_30d: int = 8,
-    bookings_last_7d: int = 2,
-    no_show_rate: float = 0.05,
-    checkins_last_30d: int = 7,
-    stamina: float = 7.0,
-    speed: float = 6.5,
-    agility: float = 7.0,
-    strength: float = 6.0,
-    endurance: float = 6.5,
-    flexibility: float = 6.0,
-    coordination: float = 7.0,
-    balance: float = 6.5,
-    # User-supplied wellness overrides (from frontend sliders)
-    fatigue_score: float = 5.0,
-    sleep_hours: float = 7.0,
-    training_hours_per_week: float = 6.0,
-    pain_score: float = 2.0,
-    stress_level: float = 4.0,
-    hydration_score: float = 7.0,
-    prior_injury_count: int = 0,
-) -> dict:
-    """Build the 67-feature dict for the external ML API."""
-
-    features = {k: 0 for k in FEATURE_KEYS}
-
-    # Physical defaults (typical college student)
-    features.update({
-        "age": 20,
-        "height_cm": 170,
-        "weight_kg": 65,
-        "bmi": round(65 / (1.70 ** 2), 1),
-    })
-
-    # Training load
-    sessions_pw = max(1, round(training_hours_per_week / 1.5))
-    features.update({
-        "training_hours_per_week": training_hours_per_week,
-        "sessions_per_week": sessions_pw,
-        "training_intensity": round(min(10, training_hours_per_week * 0.8), 1),
-        "weeks_of_training": 12,
-        "years_experience": 2 if skill_level == "Beginner" else (4 if skill_level == "Intermediate" else 7),
-    })
-
-    # Recovery & fatigue
-    recovery = round(10 - fatigue_score, 1)
-    features.update({
-        "sleep_hours": sleep_hours,
-        "fatigue_score": fatigue_score,
-        "recovery_score": recovery,
-        "rest_days_per_week": max(1, 7 - sessions_pw),
-    })
-
-    # Sport one-hot
-    features.update(_sport_flags(sport))
-
-    # Skill one-hot
-    features.update(_skill_flags(skill_level))
-
-    # Booking activity
-    features.update({
-        "bookings_last_30d": bookings_last_30d,
-        "bookings_last_7d": bookings_last_7d,
-        "no_show_rate": no_show_rate,
-        "avg_session_duration_min": 75,
-        "checkins_last_30d": checkins_last_30d,
-    })
-
-    # Performance scores
-    features.update({
-        "stamina_score": stamina,
-        "speed_score": speed,
-        "agility_score": agility,
-        "strength_score": strength,
-        "endurance_score": endurance,
-        "flexibility_score": flexibility,
-        "coordination_score": coordination,
-        "balance_score": balance,
-    })
-
-    # Injury history
-    features.update({
-        "prior_injury_knee": 0,
-        "prior_injury_ankle": 0,
-        "prior_injury_shoulder": 0,
-        "prior_injury_back": 0,
-        "prior_injury_wrist": 0,
-        "prior_injury_count": prior_injury_count,
-    })
-
-    # Environmental / sport type
-    features.update({
-        "is_indoor_sport": 1 if sport in SPORT_INDOOR else 0,
-        "plays_outdoor": 1 if sport not in SPORT_INDOOR else 0,
-        "temp_celsius": 25,
-        "high_humidity": 0,
-        "plays_rainy_conditions": 0,
-    })
-
-    # Workload ratios
-    acute = training_hours_per_week
-    chronic = max(1, training_hours_per_week * 0.8)
-    features.update({
-        "acute_chronic_workload_ratio": round(acute / chronic, 2),
-        "monotony_score": round(fatigue_score / 10, 2),
-        "strain_score": round(fatigue_score * sessions_pw, 1),
-        "consecutive_training_days": min(5, sessions_pw),
-        "days_since_last_rest": 2,
-    })
-
-    # Biomechanics (defaults to no issues)
-    features.update({
-        "poor_landing_technique": 0,
-        "asymmetric_movement": 0,
-        "muscle_imbalance": 0,
-        "joint_hypermobility": 0,
-        "overstriding": 0,
-    })
-
-    # Wellness
-    features.update({
-        "hydration_score": hydration_score,
-        "nutrition_score": 7.0,
-        "stress_level": stress_level,
-        "motivation_level": round(10 - stress_level * 0.5, 1),
-        "pain_score": pain_score,
-    })
-
-    # Competition
-    features.update({
-        "recent_competition": 0,
-        "competition_frequency": 1,
-        "travel_in_last_week": 0,
-        "time_zone_changes": 0,
-    })
-
-    # Sport context
-    features.update({
-        "team_sport": 1 if sport in {"Football", "Basketball", "Volleyball", "Cricket"} else 0,
-        "contact_sport": 1 if sport in SPORT_CONTACT else 0,
-        "high_impact_sport": 1 if sport in SPORT_HIGH_IMPACT else 0,
-    })
-
-    return features
-
-
-def _parse_prediction(raw: dict, features: dict) -> dict:
-    """Parse the ML API response into a clean structured result."""
-    # The external API returns various possible formats; handle them all
-    risk_score = 0.0
-    risk_level = "LOW"
-    predicted_injury = None
-    confidence = 0.88
-    top_factors = []
-    recommendations = []
-
-    # Try to extract risk_score / probability
-    for key in ("risk_score", "injury_probability", "probability", "score", "prediction"):
-        if key in raw and raw[key] is not None:
-            val = raw[key]
-            if isinstance(val, (int, float)):
-                risk_score = float(val)
-                break
-            if isinstance(val, str):
+    def _clean_list(items: list, sign: str) -> List[Dict]:
+        result = []
+        for item in items[:5]:
+            if isinstance(item, dict):
+                name   = item.get("name", "")
+                impact = item.get("impact", 0)
                 try:
-                    risk_score = float(val)
-                    break
-                except ValueError:
+                    impact = abs(float(impact))
+                except (ValueError, TypeError):
+                    impact = 0.0
+                if name:
+                    result.append({"name": name, "impact": round(impact, 4)})
+        return result
+
+    if isinstance(factors_data, dict):
+        increasing = _clean_list(factors_data.get("increasing", []), "+")
+        reducing   = _clean_list(factors_data.get("reducing",   []), "-")
+    elif isinstance(factors_data, list):
+        # Legacy SHAP format: [{feature, impact}, ...]
+        for item in factors_data[:10]:
+            if isinstance(item, dict):
+                name   = item.get("feature") or item.get("name", "")
+                impact = item.get("impact") or item.get("shap_value") or item.get("value", 0)
+                try:
+                    val = float(impact)
+                    entry = {"name": name.replace("_", " ").title(), "impact": round(abs(val), 4)}
+                    if val > 0:
+                        increasing.append(entry)
+                    elif val < 0:
+                        reducing.append(entry)
+                except (ValueError, TypeError):
                     pass
+        increasing = increasing[:5]
+        reducing   = reducing[:5]
 
-    # Clamp to [0,1]
-    risk_score = max(0.0, min(1.0, risk_score))
+    return increasing, reducing
 
-    # Risk level
-    for key in ("risk_level", "risk_category", "level", "category"):
-        if key in raw and isinstance(raw[key], str):
-            rl = raw[key].upper()
-            if "HIGH" in rl:
-                risk_level = "HIGH"
-            elif "MEDIUM" in rl or "MODERATE" in rl:
-                risk_level = "MEDIUM"
-            else:
-                risk_level = "LOW"
-            break
-    else:
-        # Derive from score if not in response
-        if risk_score >= 0.65:
-            risk_level = "HIGH"
-        elif risk_score >= 0.35:
-            risk_level = "MEDIUM"
-        else:
-            risk_level = "LOW"
 
-    # Predicted injury type
-    for key in ("injury_type", "predicted_injury", "injury", "injury_name"):
-        if key in raw and raw[key]:
-            predicted_injury = str(raw[key])
-            break
+# ─────────────────────────────────────────────────────────────────────────────
+# Fallback rule engine  (when ML API unavailable / no key)
+# ─────────────────────────────────────────────────────────────────────────────
+def _rule_based_prediction(features: dict) -> Tuple[float, float, float]:
+    """
+    Returns (risk_pct 0–100, onset_days, recovery_days).
+    Uses heuristic thresholds aligned with training data statistics.
+    Recovery model has weak R²; present as rough estimate only.
+    """
+    score = 0.40  # neutral baseline
 
-    # Confidence
-    for key in ("confidence", "model_confidence"):
-        if key in raw and isinstance(raw[key], (int, float)):
-            confidence = float(raw[key])
-            break
+    acr = features.get("acute_chronic_ratio", 1.0)
+    if acr > 1.5:   score += 0.25
+    elif acr > 1.3: score += 0.15
 
-    # Top contributing factors
-    for key in ("top_factors", "feature_importance", "factors", "contributing_factors"):
-        if key in raw and isinstance(raw[key], list):
-            top_factors = raw[key][:5]
-            break
-        if key in raw and isinstance(raw[key], dict):
-            top_factors = sorted(raw[key].items(), key=lambda x: -abs(x[1]))[:5]
-            top_factors = [{"feature": k, "impact": v} for k, v in top_factors]
-            break
+    sleep = features.get("sleep_minutes", 420.0) / 60.0
+    if sleep < 5.5:   score += 0.15
+    elif sleep < 6.5: score += 0.08
 
-    # If no factors from API, derive from our features
-    if not top_factors:
-        top_factors = _derive_factors(features)
+    sleep_std = features.get("sleep_std_7d", 20.0) / 60.0  # in hours
+    if sleep_std > 1.5: score += 0.10
+    elif sleep_std > 1.0: score += 0.05
 
-    # Recommendations based on risk
-    recommendations = _build_recommendations(risk_level, features, predicted_injury)
+    load_change = features.get("training_load_change", 0.0)
+    if load_change > 0.3:  score += 0.12
+    elif load_change > 0.15: score += 0.06
 
+    load_7d = features.get("training_load_7d", 0)
+    if load_7d > 4000: score += 0.10
+    elif load_7d > 2500: score += 0.05
+
+    # Reducers
+    sleep_28 = features.get("sleep_28d", 420.0) / 60.0
+    if sleep_28 >= 7.5: score -= 0.08
+    sleep_eff = features.get("sleep_efficiency", 0.9)
+    if sleep_eff >= 0.95: score -= 0.05
+
+    risk_pct = round(min(95.0, max(3.0, score * 100)), 2)
+
+    # Onset: higher risk → sooner. Model range: 1–30 days
+    onset_days = round(max(1.0, 30.0 * (1.0 - score)), 1)
+
+    # Recovery: model range 5–20 days. Weak R² — present as rough estimate.
+    recovery_days = round(5.0 + 15.0 * score, 1)
+
+    return risk_pct, onset_days, recovery_days
+
+
+def _fallback_factors(features: dict, risk_pct: float) -> Tuple[List, List]:
+    """Rule-based factor derivation when SHAP is unavailable."""
+    increasing = []
+    reducing   = []
+
+    checks = [
+        (features.get("acute_chronic_ratio", 1.0) > 1.3,         "Acute/Chronic Workload Ratio",    0.80),
+        (features.get("sleep_std_7d", 20) > 60,                  "Sleep Variability",               0.50),
+        ((features.get("sleep_minutes", 420) / 60) < 6.0,        "Sleep Duration",                  0.60),
+        (features.get("training_load_7d", 0) > 3000,             "7-Day Training Load",             0.30),
+        (features.get("training_load_change", 0.0) > 0.2,        "Training Load Spike",             0.40),
+    ]
+    reducers = [
+        (features.get("sleep_28d", 420) / 60 >= 7.5,  "Long-Term Sleep Average",    0.50),
+        (features.get("activity_load_28d", 0) > 5000, "28-Day Activity Baseline",   0.70),
+        (features.get("sleep_efficiency", 0) >= 0.95, "Sleep Efficiency",           0.30),
+    ]
+
+    for condition, name, impact in checks:
+        if condition:
+            increasing.append({"name": name, "impact": round(impact, 4)})
+
+    for condition, name, impact in reducers:
+        if condition:
+            reducing.append({"name": name, "impact": round(impact, 4)})
+
+    return increasing[:5], reducing[:5]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Response builder (spec §9)
+# ─────────────────────────────────────────────────────────────────────────────
+def _build_response(
+    athlete_id: str,
+    risk_pct: float,
+    risk_level: str,
+    is_at_risk: bool,
+    onset_days: Optional[float],
+    recovery_days: Optional[float],
+    increasing: List,
+    reducing: List,
+    model_version: str,
+    generated_at: datetime,
+    data_quality: str,
+    missing_count: int,
+    model_source: str = "external_ml",
+    api_error: Optional[str] = None,
+) -> dict:
+    """Build the exact spec §9 response shape."""
     return {
-        "risk_score": round(risk_score, 3),
-        "risk_level": risk_level,
-        "predicted_injury": predicted_injury,
-        "confidence": round(confidence, 2),
-        "top_factors": top_factors,
-        "recommendations": recommendations,
+        "success": True,
+        "data": {
+            "athlete_id": athlete_id,
+            "risk": {
+                "score": round(risk_pct, 2),
+                "level": risk_level,
+                "is_at_risk": is_at_risk,
+            },
+            "prediction": {
+                "onset_days":    round(onset_days, 1)    if onset_days    is not None else None,
+                "recovery_days": round(recovery_days, 1) if recovery_days is not None else None,
+            },
+            "factors": {
+                "increasing": increasing,
+                "reducing":   reducing,
+            },
+            "model": {
+                "version": model_version,
+                "source":  model_source,
+            },
+            "data_quality": {
+                "status":           data_quality,
+                "missing_features": missing_count,
+            },
+            "generated_at": generated_at.isoformat() + "Z",
+        },
     }
 
 
-def _derive_factors(features: dict) -> list:
-    """Derive top risk factors from the feature vector if API doesn't return them."""
-    factors = []
-    if features.get("fatigue_score", 0) >= 7:
-        factors.append({"feature": "High fatigue score", "impact": "High"})
-    if features.get("training_hours_per_week", 0) >= 12:
-        factors.append({"feature": "Excessive training load", "impact": "High"})
-    if features.get("sleep_hours", 8) < 6:
-        factors.append({"feature": "Insufficient sleep", "impact": "Medium"})
-    if features.get("pain_score", 0) >= 4:
-        factors.append({"feature": "Reported pain", "impact": "High"})
-    if features.get("prior_injury_count", 0) > 0:
-        factors.append({"feature": "Prior injury history", "impact": "Medium"})
-    if features.get("acute_chronic_workload_ratio", 1) > 1.3:
-        factors.append({"feature": "Acute:Chronic workload spike", "impact": "High"})
-    if features.get("stress_level", 0) >= 7:
-        factors.append({"feature": "High stress levels", "impact": "Medium"})
-    if not factors:
-        factors = [
-            {"feature": "Normal training load", "impact": "Low"},
-            {"feature": "Good recovery metrics", "impact": "Low"},
-        ]
-    return factors[:5]
+def _build_error(code: str, message: str) -> dict:
+    """Build a clean error response — never exposes internals (spec §14)."""
+    return {
+        "success": False,
+        "error": {"code": code, "message": message},
+    }
 
 
-def _build_recommendations(risk_level: str, features: dict, injury: Optional[str]) -> list:
-    recs = []
-    if risk_level == "HIGH":
-        recs += [
-            "⚠️ Rest for at least 2–3 days before next session",
-            "🏥 Consult a sports physician before resuming training",
-            "💧 Ensure proper hydration — minimum 3L/day",
-            "🧊 Apply ice to any sore joints post-activity",
-        ]
-    elif risk_level == "MEDIUM":
-        recs += [
-            "⚡ Reduce training intensity by 20–30% this week",
-            "😴 Prioritize 8+ hours of sleep nightly",
-            "🧘 Add 15 min stretching before & after each session",
-        ]
-    else:
-        recs += [
-            "✅ Keep up the great work! Maintain current routine",
-            "🏃 Consider adding cross-training for variety",
-        ]
-
-    if features.get("fatigue_score", 0) >= 6:
-        recs.append("😴 High fatigue detected — schedule a full recovery day")
-    if features.get("sleep_hours", 8) < 7:
-        recs.append("🌙 Target 7–9 hours of sleep for optimal recovery")
-    if features.get("training_hours_per_week", 0) > 10:
-        recs.append("📉 Gradually reduce weekly training volume to prevent overuse")
-
-    return recs[:5]
-
-
-class InjuryMLService:
-    """Proxy service for the external Athlete Injury Prediction ML API."""
+# ─────────────────────────────────────────────────────────────────────────────
+# Main ML Client
+# ─────────────────────────────────────────────────────────────────────────────
+class InjuryMLClient:
+    """
+    Secure HTTP client for the external ML API.
+    API key is sourced only from settings (env vars).
+    """
 
     def __init__(self):
-        self.base_url = settings.ML_API_URL.rstrip("/")
-        self.api_key = settings.ML_API_KEY
-        self._timeout = 30.0
+        self.base_url   = settings.ML_API_URL.rstrip("/")
+        self._timeout   = settings.ML_API_TIMEOUT
+        self._has_key   = bool(settings.ML_API_KEY)
 
     def _headers(self) -> dict:
-        h = {"Content-Type": "application/json"}
-        if self.api_key:
-            h["x-api-key"] = self.api_key
+        h = {"Content-Type": "application/json", "Accept": "application/json"}
+        if settings.ML_API_KEY:
+            h["X-API-Key"] = settings.ML_API_KEY   # spec §6: header name
         return h
 
+    # ── Health check (spec §27) ──────────────────────────────
     def health_check(self) -> dict:
         try:
             with httpx.Client(timeout=10.0) as client:
-                r = client.get(f"{self.base_url}/api/v1/health", headers=self._headers())
-                return {"ok": r.status_code == 200, "status": r.status_code}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+                r = client.get(
+                    f"{self.base_url}/api/v1/health",
+                    headers=self._headers(),
+                )
+                ok = r.status_code == 200
+                return {
+                    "ok": ok,
+                    "status_code": r.status_code,
+                    "has_api_key": self._has_key,
+                }
+        except Exception as exc:
+            logger.warning("ML health check failed: %s", exc)
+            return {"ok": False, "error": str(exc), "has_api_key": self._has_key}
 
-    def predict(
+    # ── Model info (spec §27) ────────────────────────────────
+    def model_info(self) -> dict:
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(
+                    f"{self.base_url}/api/v1/model-info",
+                    headers=self._headers(),
+                )
+                if r.status_code == 200:
+                    return r.json()
+                return {}
+        except Exception:
+            return {}
+
+    # ── Predict (spec §6 step 7–9) ───────────────────────────
+    def call_predict(
         self,
-        *,
-        user_id: int,
-        sport: str = "Badminton",
-        skill_level: str = "Intermediate",
-        bookings_last_30d: int = 8,
-        bookings_last_7d: int = 2,
-        no_show_rate: float = 0.05,
-        checkins_last_30d: int = 7,
-        stamina: float = 7.0,
-        speed: float = 6.5,
-        agility: float = 7.0,
-        strength: float = 6.0,
-        endurance: float = 6.5,
-        flexibility: float = 6.0,
-        coordination: float = 7.0,
-        balance: float = 6.5,
-        fatigue_score: float = 5.0,
-        sleep_hours: float = 7.0,
-        training_hours_per_week: float = 6.0,
-        pain_score: float = 2.0,
-        stress_level: float = 4.0,
-        hydration_score: float = 7.0,
-        prior_injury_count: int = 0,
-    ) -> dict:
+        athlete_id: str,
+        features: dict,
+    ) -> Tuple[Optional[dict], Optional[str]]:
         """
-        Build feature vector, call the external ML API, parse and return the result.
-        Falls back to a rule-based estimate if the API is unreachable.
+        POST features to ML API.
+        Returns (raw_response_data, error_code) — exactly one will be non-None.
         """
-        features = build_feature_vector(
-            user_id=user_id,
-            sport=sport,
-            skill_level=skill_level,
-            bookings_last_30d=bookings_last_30d,
-            bookings_last_7d=bookings_last_7d,
-            no_show_rate=no_show_rate,
-            checkins_last_30d=checkins_last_30d,
-            stamina=stamina,
-            speed=speed,
-            agility=agility,
-            strength=strength,
-            endurance=endurance,
-            flexibility=flexibility,
-            coordination=coordination,
-            balance=balance,
-            fatigue_score=fatigue_score,
-            sleep_hours=sleep_hours,
-            training_hours_per_week=training_hours_per_week,
-            pain_score=pain_score,
-            stress_level=stress_level,
-            hydration_score=hydration_score,
-            prior_injury_count=prior_injury_count,
-        )
-
-        payload = {
-            "athlete_id": str(user_id),
-            "features": features,
-        }
-
-        raw_response = None
-        api_error = None
+        payload = {"athlete_id": athlete_id, "features": features}
+        t0 = time.time()
 
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=float(self._timeout)) as client:
                 resp = client.post(
                     f"{self.base_url}/api/v1/predict",
                     headers=self._headers(),
                     json=payload,
                 )
+                latency_ms = round((time.time() - t0) * 1000)
+
                 if resp.status_code == 401:
-                    api_error = "ML API key required — using rule-based fallback"
-                elif resp.status_code == 422:
-                    api_error = f"Feature validation error: {resp.text[:200]}"
+                    logger.warning(
+                        "ML API auth error [%dms] athlete=%s — API key missing/invalid",
+                        latency_ms, athlete_id,
+                    )
+                    return None, MLError.AUTH_ERROR
+
+                if resp.status_code == 422:
+                    logger.error(
+                        "ML API validation error [%dms] athlete=%s body=%s",
+                        latency_ms, athlete_id, resp.text[:300],
+                    )
+                    return None, MLError.INVALID_RESPONSE
+
+                resp.raise_for_status()
+                body = resp.json()
+
+                # ML API returns {"success": true, "data": {...}} already
+                if isinstance(body, dict) and body.get("success") and "data" in body:
+                    raw = body["data"]
                 else:
-                    resp.raise_for_status()
-                    raw_response = resp.json()
-        except httpx.HTTPStatusError as e:
-            api_error = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
-        except Exception as e:
-            api_error = str(e)
+                    raw = body  # handle flat response just in case
 
-        if raw_response:
-            parsed = _parse_prediction(raw_response, features)
+                logger.info(
+                    "ML API predict OK [%dms] athlete=%s model=%s",
+                    latency_ms, athlete_id, raw.get("model", {}).get("version", "?"),
+                )
+                return raw, None
+
+        except httpx.TimeoutException:
+            logger.error("ML API timeout after %ds for athlete=%s", self._timeout, athlete_id)
+            return None, MLError.TIMEOUT
+        except httpx.ConnectError:
+            logger.error("ML API connection error for athlete=%s", athlete_id)
+            return None, MLError.UNAVAILABLE
+        except httpx.HTTPStatusError as exc:
+            logger.error("ML API HTTP %d for athlete=%s", exc.response.status_code, athlete_id)
+            return None, MLError.UNAVAILABLE
+        except Exception as exc:
+            logger.exception("ML API unexpected error for athlete=%s: %s", athlete_id, exc)
+            return None, MLError.INTERNAL
+
+    # ── Full prediction pipeline  (spec §6 steps 6–11) ───────
+    def predict(
+        self,
+        athlete_id: str,
+        features: dict,
+        data_quality: str,
+        missing_count: int,
+    ) -> dict:
+        """
+        Orchestrates the full ML pipeline and returns a spec §9 response.
+        Falls back to rule engine if API unavailable / no key.
+        """
+        generated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Guard: insufficient data — allow partial, block only true insufficient
+        if data_quality == DataQuality.INSUFFICIENT:
+            # Try anyway with defaults; the model is robust to defaults
+            logger.warning(
+                "predict: INSUFFICIENT quality for athlete=%s — attempting with defaults",
+                athlete_id,
+            )
+
+        raw, error_code = self.call_predict(athlete_id, features)
+
+        # ── Parse ML API response (spec §9 shape already) ─────
+        onset_days    = None
+        recovery_days = None
+        risk_pct      = 0.0
+        risk_level    = "LOW"
+        is_at_risk    = False
+        increasing: List[Dict] = []
+        reducing:   List[Dict] = []
+        model_version = MODEL_VERSION
+        model_source  = "rule_engine"
+
+        if raw:
+            try:
+                # ML API already returns spec §9 inside "data"
+                risk_block      = raw.get("risk", {})
+                prediction_block = raw.get("prediction", {})
+                factors_block   = raw.get("factors", {})
+                model_block     = raw.get("model", {})
+
+                risk_pct      = float(risk_block.get("score", 0))
+                risk_level    = risk_block.get("level", "LOW")
+                is_at_risk    = bool(risk_block.get("is_at_risk", False))
+
+                onset_days    = prediction_block.get("onset_days")
+                recovery_days = prediction_block.get("recovery_days")
+
+                model_version = model_block.get("version", MODEL_VERSION)
+                model_source  = "external_ml"
+
+                increasing, reducing = _parse_factors(factors_block)
+
+                logger.info(
+                    "predict: ML response parsed athlete=%s risk=%.1f%% level=%s onset=%s recovery=%s",
+                    athlete_id, risk_pct, risk_level, onset_days, recovery_days,
+                )
+
+            except Exception as exc:
+                logger.exception("Failed to parse ML response: %s", exc)
+                raw = None
+                error_code = MLError.INVALID_RESPONSE
+
+        # ── Fallback rule engine ─────────────────────────────
+        if not raw:
+            risk_pct_fb, onset_days, recovery_days = _rule_based_prediction(features)
+            risk_pct   = risk_pct_fb
+            risk_level, is_at_risk = _score_to_level(risk_pct)
+            increasing, reducing = _fallback_factors(features, risk_pct)
+            model_version = f"{MODEL_VERSION}-fallback"
+            model_source  = "rule_engine"
+
+            logger.info(
+                "Using fallback rule engine for athlete=%s reason=%s risk=%.1f%%",
+                athlete_id, error_code or "no_raw", risk_pct,
+            )
         else:
-            # Rule-based fallback
-            parsed = _fallback_prediction(features, api_error)
+            # Validate level is one of expected values
+            if risk_level not in ("LOW", "MEDIUM", "HIGH"):
+                risk_level, is_at_risk = _score_to_level(risk_pct)
 
-        return {
-            **parsed,
-            "features": features,
-            "raw_response": raw_response,
-            "api_error": api_error,
-            "model_source": "external_ml" if raw_response else "fallback_rules",
-            "athlete_id": str(user_id),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        # Clamp regression outputs within model training ranges
+        if onset_days is not None:
+            onset_days    = round(max(1.0, min(30.0, float(onset_days))), 1)
+        if recovery_days is not None:
+            recovery_days = round(max(5.0, min(20.0, float(recovery_days))), 1)
 
-
-def _fallback_prediction(features: dict, error: Optional[str]) -> dict:
-    """Simple rule-based fallback when the external ML API is unreachable."""
-    score = 0.0
-    score += features.get("fatigue_score", 5) * 0.04         # max 0.40
-    score += (10 - features.get("sleep_hours", 7)) * 0.02    # max 0.06
-    score += features.get("pain_score", 0) * 0.04            # max 0.40
-    score += features.get("prior_injury_count", 0) * 0.05    # max 0.10
-    acwr = features.get("acute_chronic_workload_ratio", 1.0)
-    if acwr > 1.3:
-        score += 0.15
-    score += features.get("stress_level", 4) * 0.01          # max 0.10
-    score = round(min(0.95, max(0.02, score)), 3)
-
-    if score >= 0.65:
-        risk_level = "HIGH"
-    elif score >= 0.35:
-        risk_level = "MEDIUM"
-    else:
-        risk_level = "LOW"
-
-    return {
-        "risk_score": score,
-        "risk_level": risk_level,
-        "predicted_injury": None,
-        "confidence": 0.75,
-        "top_factors": _derive_factors(features),
-        "recommendations": _build_recommendations(risk_level, features, None),
-    }
+        return _build_response(
+            athlete_id=athlete_id,
+            risk_pct=risk_pct,
+            risk_level=risk_level,
+            is_at_risk=is_at_risk,
+            onset_days=onset_days,
+            recovery_days=recovery_days,
+            increasing=increasing,
+            reducing=reducing,
+            model_version=model_version,
+            generated_at=generated_at,
+            data_quality=data_quality,
+            missing_count=missing_count,
+            model_source=model_source,
+            api_error=error_code,
+        )
 
 
-# Singleton
-injury_ml_service = InjuryMLService()
+# Singleton — import this everywhere
+injury_ml_client = InjuryMLClient()

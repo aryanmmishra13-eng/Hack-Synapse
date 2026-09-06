@@ -19,9 +19,11 @@ class Settings(BaseSettings):
         "postgresql://campus_user:campus_pass@localhost:5432/campus_sports_db"
     )
 
-    # External ML API for Athlete Injury Prediction
+    # Athlete Injury Prediction ML API (spec §7)
     ML_API_URL: str = os.getenv("ML_API_URL", "https://athlete-injury-ml-api.onrender.com")
-    ML_API_KEY: str = os.getenv("ML_API_KEY", "")
+    ML_API_KEY: str = os.getenv("ML_API_KEY", "")          # never hardcode
+    ML_API_TIMEOUT: int = int(os.getenv("ML_API_TIMEOUT", "30"))
+    ML_PREDICTION_CACHE_MINUTES: int = int(os.getenv("ML_PREDICTION_CACHE_MINUTES", "60"))
 
     class Config:
         case_sensitive = True

@@ -246,4 +246,323 @@ def test_weather_endpoints():
     risks_res = client.get("/api/weather/admin/risks", headers=admin_headers)
     assert risks_res.status_code == 200
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ML Injury Prediction Tests  (spec §30)
+# All tests use the fallback rule engine — no dependency on live Render API
+# ─────────────────────────────────────────────────────────────────────────────
 
+def _student_headers():
+    """Return auth headers for the demo student account."""
+    res = client.post("/api/auth/login", json={
+        "email": "student@campus.com",
+        "password": "password123"
+    })
+    if res.status_code != 200:
+        pytest.skip("Demo student account not seeded — skipping ML tests")
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def _admin_headers():
+    """Return auth headers for the demo admin account."""
+    res = client.post("/api/auth/login", json={
+        "email": "admin@campus.com",
+        "password": "admin123"
+    })
+    if res.status_code != 200:
+        pytest.skip("Demo admin account not seeded — skipping ML tests")
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def _coach_headers():
+    """Return auth headers for the demo coach account."""
+    res = client.post("/api/auth/login", json={
+        "email": "coach.rahul@campus.com",
+        "password": "coach123"
+    })
+    if res.status_code != 200:
+        pytest.skip("Demo coach account not seeded — skipping ML tests")
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def _get_student_id(headers):
+    """Get the student's user ID from the login response."""
+    res = client.post("/api/auth/login", json={
+        "email": "student@campus.com",
+        "password": "password123"
+    })
+    if res.status_code != 200:
+        pytest.skip("Cannot resolve student ID")
+    return res.json()["user"]["id"]
+
+
+# ── Spec §30 test 11: Authorization — unauthenticated → 401 ──────────────────
+def test_injury_risk_requires_auth():
+    """Unauthenticated access must be rejected."""
+    res = client.get("/api/predictions/injury-risk/1")
+    assert res.status_code == 401, f"Expected 401, got {res.status_code}"
+
+
+# ── Spec §30 test 11: Student accesses own data → valid response shape ────────
+def test_injury_risk_student_own_data():
+    """Student can fetch their own injury risk — response matches spec §9 shape."""
+    headers = _student_headers()
+    student_id = _get_student_id(headers)
+
+    res = client.get(f"/api/predictions/injury-risk/{student_id}", headers=headers)
+    assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.text[:200]}"
+
+    body = res.json()
+    assert body.get("success") is True, f"success != True: {body}"
+
+    data = body["data"]
+    # Spec §9 shape checks
+    assert "athlete_id" in data
+    assert "risk" in data
+    assert "score" in data["risk"]
+    assert "level" in data["risk"]
+    assert data["risk"]["level"] in ("LOW", "MEDIUM", "HIGH")
+    assert "is_at_risk" in data["risk"]
+    assert isinstance(data["risk"]["score"], (int, float))
+    assert 0 <= data["risk"]["score"] <= 100
+
+    assert "prediction" in data
+    assert "factors" in data
+    assert "increasing" in data["factors"]
+    assert "reducing" in data["factors"]
+    assert "model" in data
+    assert "version" in data["model"]
+    assert "generated_at" in data
+
+
+# ── Spec §30 test 11: Student → another student's data → 403 ─────────────────
+def test_injury_risk_student_cross_access_denied():
+    """Student cannot access another student's injury data."""
+    headers = _student_headers()
+    student_id = _get_student_id(headers)
+
+    # Try to access a different user's data
+    other_id = student_id + 999  # very unlikely to be the same user
+    res = client.get(f"/api/predictions/injury-risk/{other_id}", headers=headers)
+    # Should be 403 (cross-access) or 200 with error (athlete not found)
+    assert res.status_code in (403, 200), f"Unexpected status: {res.status_code}"
+    if res.status_code == 200:
+        # If athlete not found it returns success=False
+        body = res.json()
+        assert body.get("success") is False or res.status_code == 403
+
+
+# ── Spec §30 test 2: Athlete not found ───────────────────────────────────────
+def test_injury_risk_athlete_not_found():
+    """Admin requesting non-existent athlete should get clean error."""
+    headers = _admin_headers()
+    res = client.get("/api/predictions/injury-risk/999999", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    # Should return success=False with ATHLETE_NOT_FOUND code
+    assert body.get("success") is False
+    assert body.get("error", {}).get("code") == "ATHLETE_NOT_FOUND"
+
+
+# ── Spec §30 test 10: Prediction persists in history ─────────────────────────
+def test_injury_risk_history():
+    """Prediction history returns a list in the correct shape."""
+    headers = _student_headers()
+    student_id = _get_student_id(headers)
+
+    # First trigger a prediction so history is non-empty
+    client.post(f"/api/predictions/injury-risk/{student_id}/refresh", headers=headers)
+
+    res = client.get(f"/api/predictions/injury-risk/{student_id}/history", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body.get("success") is True
+    assert "history" in body
+    assert isinstance(body["history"], list)
+
+    if body["history"]:
+        record = body["history"][0]
+        assert "risk" in record
+        assert "score" in record["risk"]
+        assert "level" in record["risk"]
+        assert "prediction" in record
+        assert "model" in record
+        assert "generated_at" in record
+
+
+# ── Spec §30 test 6: Refresh endpoint ────────────────────────────────────────
+def test_injury_risk_refresh():
+    """POST refresh generates a new prediction regardless of cache."""
+    headers = _student_headers()
+    student_id = _get_student_id(headers)
+
+    res = client.post(f"/api/predictions/injury-risk/{student_id}/refresh", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body.get("success") is True
+    data = body["data"]
+    assert data.get("cached") is False, "Refreshed prediction should not be marked cached"
+    assert "risk" in data
+    assert "model" in data
+
+
+# ── Spec §30 tests 4, 5, 6: Health log save + retrieve ───────────────────────
+def test_health_log_save_and_retrieve():
+    """Health log can be saved and retrieved for an athlete."""
+    headers = _student_headers()
+    student_id = _get_student_id(headers)
+
+    from datetime import datetime, timedelta
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Save 2 days of health data
+    payload = {
+        "logs": [
+            {
+                "date": today,
+                "calories_burned": 480.0,
+                "sleep_hours": 7.5,
+                "sleep_quality": 8.0,
+                "total_steps": 8500,
+                "steps_entries": [{"hour": 7, "value": 2000}, {"hour": 12, "value": 3000}],
+                "heart_rate_entries": [{"hour": 7, "value": 145}, {"hour": 18, "value": 162}],
+                "resting_hr": 58.0,
+                "max_hr": 175.0,
+            },
+            {
+                "date": yesterday,
+                "calories_burned": 420.0,
+                "sleep_hours": 6.5,
+                "sleep_quality": 7.0,
+                "total_steps": 7200,
+                "steps_entries": [],
+                "heart_rate_entries": [],
+            },
+        ]
+    }
+    save_res = client.post(f"/api/predictions/health-log/{student_id}", headers=headers, json=payload)
+    assert save_res.status_code == 200
+    save_data = save_res.json()
+    assert save_data.get("success") is True
+    assert save_data.get("saved") == 2
+
+    # Retrieve and verify
+    get_res = client.get(f"/api/predictions/health-log/{student_id}?days=7", headers=headers)
+    assert get_res.status_code == 200
+    get_data = get_res.json()
+    assert get_data.get("success") is True
+    logs = get_data.get("logs", [])
+    assert len(logs) >= 1
+    # Check today's log is present
+    dates = [l["date"] for l in logs]
+    assert today in dates
+
+
+# ── Spec §30 test 11: Admin → ML status ──────────────────────────────────────
+def test_ml_status_admin_access():
+    """Admin can view ML monitoring status."""
+    headers = _admin_headers()
+    res = client.get("/api/predictions/ml-status", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert "ml_api" in body
+    assert "model" in body
+    assert "stats" in body
+    # Should not expose API key
+    body_str = str(body)
+    assert "ML_API_KEY" not in body_str
+    assert "X-API-Key" not in body_str
+
+
+# ── Spec §30 test 11: Coach → ML status ──────────────────────────────────────
+def test_ml_status_coach_access():
+    """Coach can also view ML monitoring status (spec §27 allows admin+coach)."""
+    headers = _coach_headers()
+    res = client.get("/api/predictions/ml-status", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert "ml_api" in body
+
+
+# ── Spec §30 test 11: Student → ML status denied ─────────────────────────────
+def test_ml_status_student_denied():
+    """Student must not be able to access the admin ML status endpoint."""
+    headers = _student_headers()
+    res = client.get("/api/predictions/ml-status", headers=headers)
+    assert res.status_code == 403, f"Student should not access ml-status, got {res.status_code}"
+
+
+# ── Spec §30 test 3: Feature engineering doesn't crash on empty data ──────────
+def test_feature_engineering_no_crash_on_empty():
+    """Feature service should still return a 67-feature vector when data is missing."""
+    from app.services.feature_service import build_feature_vector
+    from app.database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        # Use admin user (user_id=1) — may have no health logs, but should not crash
+        headers = _admin_headers()
+        admin_login = client.post("/api/auth/login", json={
+            "email": "admin@campus.com",
+            "password": "admin123"
+        }).json()
+        admin_id = admin_login.get("user", {}).get("id", 1)
+
+        features, quality, missing = build_feature_vector(user_id=admin_id, db=db)
+        assert len(features) == 67, f"Expected 67 features, got {len(features)}"
+        assert quality in ("GOOD", "PARTIAL", "INSUFFICIENT")
+        assert isinstance(missing, int)
+    except ValueError as e:
+        # User not found is acceptable (seeded data may vary)
+        assert "not found" in str(e).lower()
+    finally:
+        db.close()
+
+
+# ── Spec §30 test 15: Risk rendering — level maps correctly ──────────────────
+def test_risk_level_mapping():
+    """Verify internal risk level thresholds map score → level correctly."""
+    from app.services.injury_ml_service import _score_to_level
+
+    level, at_risk = _score_to_level(5.0)
+    assert level == "LOW"
+    assert at_risk is False
+
+    level, at_risk = _score_to_level(50.0)
+    assert level == "MEDIUM"
+    assert at_risk is False
+
+    level, at_risk = _score_to_level(80.0)
+    assert level == "HIGH"
+    assert at_risk is True  # >= 70% optimal threshold
+
+
+# ── Data quality assessment test ──────────────────────────────────────────────
+def test_data_quality_assessment():
+    """Data quality returns a valid status string."""
+    from app.services.feature_service import _assess_quality, DataQuality
+
+    # No data at all → INSUFFICIENT
+    missing, quality = _assess_quality(health_logs=[], fitness=[], bookings=[])
+    assert quality == DataQuality.INSUFFICIENT
+
+    # Some data → GOOD or PARTIAL
+    class FakeLog:
+        pass
+
+    fake_logs = [FakeLog() for _ in range(5)]
+    missing2, quality2 = _assess_quality(health_logs=fake_logs, fitness=fake_logs, bookings=fake_logs)
+    assert quality2 in (DataQuality.GOOD, DataQuality.PARTIAL)
+
+
+# ── ML service error response format ─────────────────────────────────────────
+def test_ml_error_response_format():
+    """Error responses must have clean code+message and no internal details."""
+    from app.services.injury_ml_service import _build_error
+
+    err = _build_error("ML_SERVICE_UNAVAILABLE", "Injury prediction service is temporarily unavailable.")
+    assert err["success"] is False
+    assert err["error"]["code"] == "ML_SERVICE_UNAVAILABLE"
+    assert "traceback" not in str(err).lower()
+    assert "exception" not in str(err).lower()
+    assert "stacktrace" not in str(err).lower()

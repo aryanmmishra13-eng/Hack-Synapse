@@ -3,7 +3,8 @@ import { NavLink } from 'react-router-dom';
 import { 
   Home, Activity, CalendarCheck, Users, Gamepad2, Bell, User, 
   LayoutDashboard, Building2, BarChart3, Sliders, Wrench, Sparkles,
-  Trophy, Package, TrendingUp, Medal, FileText, Flame, ClipboardList, Award, QrCode
+  Trophy, Package, TrendingUp, Medal, FileText, Flame, ClipboardList, Award, QrCode,
+  ShieldAlert
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -19,6 +20,7 @@ export const Sidebar = () => {
     { to: '/app/training', label: 'TRAINING SESSIONS', icon: Award },
     { to: '/app/my-stats', label: 'ACTIVITY & FITNESS', icon: Flame },
     { to: '/app/performance', label: 'SKILL PERFORMANCE', icon: TrendingUp },
+    { to: '/app/injury-risk', label: 'INJURY RISK AI', icon: ShieldAlert, badge: 'AI' },
     { to: '/app/awards', label: 'TROPHY CABINET', icon: Medal },
     { to: '/app/play-now', label: 'PLAY NOW (LIVE)', icon: Gamepad2, badge: 'LIVE' },
     { to: '/app/find-players', label: 'FIND PLAYERS', icon: Users },
